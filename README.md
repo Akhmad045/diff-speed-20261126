@@ -7,7 +7,7 @@
 A faster drop-in for make.fun's own makefun-diff 1.0.0 — the entry for the
 [diff-speed-01-run-20261126 bounty](https://make.fun/bounty/diff-speed-01-run-20261126)
 on make.fun ($100, top 10 paid). It answers every case exactly as makefun-diff
-does, in about a quarter of the time.
+does, in about a seventh of the time.
 
 ## How it works
 
@@ -40,6 +40,16 @@ The speed comes from changes that do not change the result:
 4. **Hoisted edge diagonals.** The two edge diagonals of each depth (only
    one candidate each) are handled outside the inner loop, so the loop body
    has no edge tests.
+5. **A WebAssembly SIMD core.** The search itself runs in `myers.wasm`:
+   the middle of each depth is computed four diagonals at a time with
+   `i32x4` — the two candidates, the validity tests and the
+   deletion-preferred max are all vector operations, the four pre-snake `x`
+   values are stored with one `v128.store`, and only the snake (almost
+   always zero steps), the fix-up store and the end check run per diagonal
+   in scalar code. The search order, the tie-break and the backtrack are
+   the same as the JS port, so the runs are identical; any wasm failure
+   falls back to the JS implementation, which stays the reference for
+   correctness.
 
 The backtrack recomputes each step's predecessor with the same tie-break the
 forward pass used, and takes the snake length from the predecessor's stored
@@ -53,16 +63,18 @@ grouping, hunk merging (runs at most 6 kept lines apart share a hunk) and
 
 | case | lines (old → new) | edit distance | this entry | makefun-diff 1.0.0 |
 |------|-------------------|---------------|------------|--------------------|
-| g-0001 | 27,072 → 27,371 | 3,793 | 115 ms | 484 ms |
-| g-0002 | 25,134 → 25,347 | 3,979 | 108 ms | 558 ms |
-| g-0003 | 31,524 → 31,817 | 3,477 | 131 ms | 420 ms |
-| g-0004 | 21,584 → 21,869 | 3,739 | 85 ms | 347 ms |
-| **total** | | | **440 ms** | **1,808 ms** |
+| g-0001 | 27,072 → 27,371 | 3,793 | 40 ms | 331 ms |
+| g-0002 | 25,134 → 25,347 | 3,979 | 44 ms | 372 ms |
+| g-0003 | 31,524 → 31,817 | 3,477 | 52 ms | 286 ms |
+| g-0004 | 21,584 → 21,869 | 3,739 | 43 ms | 328 ms |
+| **total** | | | **180 ms** | **1,317 ms** |
 
-**4.1× faster than the reference on the practice set** (median of 3 runs on
-this machine; all 4 cases byte-identical to the expected answers). The live
-practice board's best is 640,000 µs at the time of writing; the final set is
-a fresh draw, result after 30 November 2026.
+**7.3× faster than the reference on the practice set** (median of 5 runs on
+this machine; all 4 cases byte-identical to the expected answers). Against
+the pure-JS version of this same entry (440 ms locally, 1,210,000 µs on the
+platform) it is about 2× faster. The live board's top 10 sits at 580,000 µs
+at the time of writing; the final set is a fresh draw, result after
+30 November 2026.
 
 ## Run it
 

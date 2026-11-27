@@ -25,6 +25,15 @@
 //     sentinel and the snake stops.
 //  4. The two edge diagonals of each depth (only one candidate each) are
 //     handled outside the inner loop, so the loop body has no edge tests.
+//  5. The search itself runs in WebAssembly (myers.wasm): the middle of each
+//     depth is computed four diagonals at a time with i32x4 SIMD — the two
+//     candidates, the validity tests and the deletion-preferred max are all
+//     vector operations, the four pre-snake x values are stored with one
+//     v128.store, and only the snake (almost always zero steps), the
+//     fix-up store and the end check run per diagonal in scalar code. The
+//     search order, the tie-break and the backtrack are the same as the JS
+//     port below, so the runs are identical; any wasm failure falls back to
+//     the JS implementation, which stays the reference for correctness.
 // The backtrack recomputes each step's predecessor with the same tie-break
 // the forward pass used, and takes the snake length from the predecessor's
 // stored x — never from a line-comparison walk-back (a walk-back can
@@ -45,6 +54,61 @@ export const CONTEXT = 3;
 const KEEP = 0;
 const DELETE = 1;
 const INSERT = 2;
+
+// ---- WebAssembly Myers core (myers.wasm, shipped in this repo) ----
+// A faithful port of myersRunsJS below: same search order, same
+// deletion-preferred tie-break, same backtrack, so its runs are identical.
+// Any failure (no wasm, bad sizes, a negative return code) falls back to
+// the JS implementation, which stays the reference for correctness.
+import { readFileSync } from 'node:fs';
+
+let WASM = null;
+try {
+  const bytes = readFileSync(new URL('./myers.wasm', import.meta.url));
+  WASM = new WebAssembly.Instance(new WebAssembly.Module(bytes), {}).exports;
+} catch {
+  WASM = null;
+}
+
+/** Run capacities of the wasm out/steps buffers, in (kind, count) pairs. */
+const WASM_OUT_CAP = 131072;
+const WASM_STEPS_CAP = 262144;
+
+/** The middle slices' runs from the wasm core, or null to fall back to JS. */
+function myersRunsWasm(A0, B0) {
+  const n = A0.length;
+  const m = B0.length;
+  const mem = WASM.memory;
+  const L = 2 * n + m + 2;
+  const aPtr = 0;
+  const bPtr = 4 * L;
+  const outPtr = 8 * L;
+  const stepsPtr = outPtr + 8 * WASM_OUT_CAP;
+  const rowsPtr = stepsPtr + 8 * WASM_STEPS_CAP;
+  try {
+    const need = rowsPtr + 4 - mem.buffer.byteLength;
+    if (need > 0) mem.grow(Math.ceil(need / 65536));
+  } catch {
+    return null;
+  }
+  const A = new Int32Array(mem.buffer, aPtr, L);
+  A.set(A0);
+  A.fill(-1, n);
+  const B = new Int32Array(mem.buffer, bPtr, L);
+  B.set(B0);
+  B.fill(-2, m);
+  let rc;
+  try {
+    rc = WASM.diff(n, m, aPtr, bPtr, rowsPtr, outPtr, stepsPtr, WASM_OUT_CAP, WASM_STEPS_CAP);
+  } catch {
+    return null;
+  }
+  if (rc < 0) return null;
+  const out = new Int32Array(mem.buffer, outPtr, rc * 2);
+  const runs = [];
+  for (let i = 0; i < rc; i++) runs.push({ kind: out[i * 2], count: out[i * 2 + 1] });
+  return runs;
+}
 
 /** One case's answer: makefun-diff 1.0.0's patch of input { old, new }. */
 export function run(input) {
@@ -94,6 +158,20 @@ export function run(input) {
 
 /** The runs of the edit script of A0 into B0: [{ kind, count }], in order. */
 function myersRuns(A0, B0) {
+  const n = A0.length;
+  const m = B0.length;
+  // A trivial middle needs no search: the script is all one kind.
+  if (n === 0) return m === 0 ? [] : [{ kind: INSERT, count: m }];
+  if (m === 0) return [{ kind: DELETE, count: n }];
+  if (WASM !== null) {
+    const runs = myersRunsWasm(A0, B0);
+    if (runs !== null) return runs;
+  }
+  return myersRunsJS(A0, B0);
+}
+
+/** The JS Myers search (the fallback; also the correctness reference). */
+function myersRunsJS(A0, B0) {
   const n = A0.length;
   const m = B0.length;
   // Pad with sentinels so the snake loop needs no bounds checks: a read past
